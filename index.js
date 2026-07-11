@@ -4,7 +4,7 @@ dns.setServers(["8.8.8.8", "8.8.4.4"]);
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import { MongoClient } from "mongodb";
+import { MongoClient, ObjectId } from "mongodb";
 
 dotenv.config();
 
@@ -27,9 +27,8 @@ const client = new MongoClient(process.env.MONGO_DB_URI);
 const dbName = process.env.DB_NAME || "roamify";
 const db = client.db(dbName);
 
-
 const toursCollection = db.collection("tours");
-const usersCollection = db.collection("user"); 
+const usersCollection = db.collection("user");
 const bookingsCollection = db.collection("bookings");
 
 app.get("/", (req, res) => {
@@ -105,7 +104,6 @@ app.get("/tours", async (req, res) => {
 // GET /tours/:id — fetch a single tour (for prefilling the edit form)
 app.get("/tours/:id", async (req, res) => {
   try {
-    const { ObjectId } = await import("mongodb");
     const { id } = req.params;
 
     if (!ObjectId.isValid(id)) {
@@ -128,7 +126,6 @@ app.get("/tours/:id", async (req, res) => {
 // PATCH /tours/:id — update an existing tour
 app.patch("/tours/:id", async (req, res) => {
   try {
-    const { ObjectId } = await import("mongodb");
     const { id } = req.params;
 
     if (!ObjectId.isValid(id)) {
@@ -176,8 +173,11 @@ app.patch("/tours/:id", async (req, res) => {
 // DELETE /tours/:id — remove a tour
 app.delete("/tours/:id", async (req, res) => {
   try {
-    const { ObjectId } = await import("mongodb");
     const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ error: "Invalid tour id." });
+    }
 
     const result = await toursCollection.deleteOne({ _id: new ObjectId(id) });
 
@@ -195,7 +195,6 @@ app.delete("/tours/:id", async (req, res) => {
 // POST /bookings — create a new booking for a tour
 app.post("/bookings", async (req, res) => {
   try {
-    const { ObjectId } = await import("mongodb");
     const { tourId, userId, userName, userEmail, guests, date } = req.body;
 
     if (!tourId || !userId || !guests || !date) {
@@ -240,6 +239,85 @@ app.post("/bookings", async (req, res) => {
     res.status(201).json({ message: "Booking created successfully.", bookingId: result.insertedId });
   } catch (err) {
     console.error("Error creating booking:", err);
+    res.status(500).json({ error: "Something went wrong on our end." });
+  }
+});
+
+// GET /organizer/stats — aggregated dashboard numbers for one organizer
+app.get("/organizer/stats", async (req, res) => {
+  try {
+    const { organizerId } = req.query;
+
+    if (!organizerId) {
+      return res.status(400).json({ error: "organizerId is required." });
+    }
+
+    const tours = await toursCollection.find({ organizerId }).toArray();
+    const bookings = await bookingsCollection.find({ organizerId }).toArray();
+
+    const totalTours = tours.length;
+    const totalBookings = bookings.length;
+
+    const totalRevenue = bookings
+      .filter((b) => b.status !== "cancelled")
+      .reduce((sum, b) => sum + (b.totalPrice || 0), 0);
+
+    const ratedTours = tours.filter((t) => typeof t.rating === "number" && t.rating > 0);
+    const averageRating =
+      ratedTours.length > 0
+        ? ratedTours.reduce((sum, t) => sum + t.rating, 0) / ratedTours.length
+        : 0;
+
+    res.status(200).json({
+      stats: {
+        totalTours,
+        totalBookings,
+        totalRevenue,
+        averageRating,
+      },
+    });
+  } catch (err) {
+    console.error("Error fetching organizer stats:", err);
+    res.status(500).json({ error: "Something went wrong on our end." });
+  }
+});
+app.get("/bookings", async (req, res) => {
+  try {
+    const { userId, organizerId } = req.query;
+
+    if (!userId && !organizerId) {
+      return res.status(400).json({ error: "userId or organizerId is required." });
+    }
+
+    const query = userId ? { userId } : { organizerId };
+
+    const bookings = await bookingsCollection.find(query).sort({ createdAt: -1 }).toArray();
+
+    res.status(200).json({ bookings });
+  } catch (err) {
+    console.error("Error fetching bookings:", err);
+    res.status(500).json({ error: "Something went wrong on our end." });
+  }
+});
+
+// DELETE /bookings/:id — cancel a booking
+app.delete("/bookings/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ error: "Invalid booking id." });
+    }
+
+    const result = await bookingsCollection.deleteOne({ _id: new ObjectId(id) });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ error: "Booking not found." });
+    }
+
+    res.status(200).json({ message: "Booking cancelled successfully." });
+  } catch (err) {
+    console.error("Error cancelling booking:", err);
     res.status(500).json({ error: "Something went wrong on our end." });
   }
 });
