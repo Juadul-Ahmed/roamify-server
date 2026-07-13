@@ -35,7 +35,7 @@ app.get("/", (req, res) => {
   res.send("Hello World!");
 });
 
-// POST /tours — create a new tour
+// POST /tours 
 app.post("/tours", async (req, res) => {
   try {
     const { title, location, price, category, description, image, organizerId, organizerName } = req.body;
@@ -67,8 +67,7 @@ app.post("/tours", async (req, res) => {
   }
 });
 
-// GET /tours — list tours. organizerId filters to one organizer's tours
-// (used by the dashboard); omit it for public browsing (used by Explore).
+// GET /tours 
 app.get("/tours", async (req, res) => {
   try {
     const { organizerId, search, category, sort } = req.query;
@@ -101,7 +100,7 @@ app.get("/tours", async (req, res) => {
   }
 });
 
-// GET /tours/:id — fetch a single tour (for prefilling the edit form)
+// GET /tours/:id
 app.get("/tours/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -123,7 +122,7 @@ app.get("/tours/:id", async (req, res) => {
   }
 });
 
-// PATCH /tours/:id — update an existing tour
+// PATCH /tours/:id 
 app.patch("/tours/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -138,10 +137,6 @@ app.patch("/tours/:id", async (req, res) => {
       return res.status(400).json({ error: "All fields are required." });
     }
 
-    // organizerId/organizerName are intentionally NOT taken from req.body here —
-    // ownership shouldn't change on an edit. Once auth middleware is added, this
-    // route should also verify req.user.id matches the tour's existing organizerId
-    // before allowing the update.
 
     const result = await toursCollection.findOneAndUpdate(
       { _id: new ObjectId(id) },
@@ -170,7 +165,7 @@ app.patch("/tours/:id", async (req, res) => {
   }
 });
 
-// DELETE /tours/:id — remove a tour
+// DELETE /tours/:id 
 app.delete("/tours/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -192,7 +187,7 @@ app.delete("/tours/:id", async (req, res) => {
   }
 });
 
-// POST /bookings — create a new booking for a tour
+// POST /bookings 
 app.post("/bookings", async (req, res) => {
   try {
     const { tourId, userId, userName, userEmail, guests, date } = req.body;
@@ -243,7 +238,7 @@ app.post("/bookings", async (req, res) => {
   }
 });
 
-// GET /organizer/stats — aggregated dashboard numbers for one organizer
+// GET /organizer/stats
 app.get("/organizer/stats", async (req, res) => {
   try {
     const { organizerId } = req.query;
@@ -278,6 +273,103 @@ app.get("/organizer/stats", async (req, res) => {
     });
   } catch (err) {
     console.error("Error fetching organizer stats:", err);
+    res.status(500).json({ error: "Something went wrong on our end." });
+  }
+});
+// GET /admin/stats
+app.get("/admin/stats", async (req, res) => {
+  try {
+    const [totalUsers, totalOrganizers, totalTravelers, totalTours, allBookings] = await Promise.all([
+      usersCollection.countDocuments({}),
+      usersCollection.countDocuments({ role: "organizer" }),
+      usersCollection.countDocuments({ role: "traveler" }),
+      toursCollection.countDocuments({}),
+      bookingsCollection.find({}).toArray(),
+    ]);
+
+    const totalBookings = allBookings.length;
+
+    const totalRevenue = allBookings
+      .filter((b) => b.status !== "cancelled")
+      .reduce((sum, b) => sum + (b.totalPrice || 0), 0);
+
+    res.status(200).json({
+      stats: {
+        totalUsers,
+        totalOrganizers,
+        totalTravelers,
+        totalTours,
+        totalBookings,
+        totalRevenue,
+      },
+    });
+  } catch (err) {
+    console.error("Error fetching admin stats:", err);
+    res.status(500).json({ error: "Something went wrong on our end." });
+  }
+});
+
+// GET /admin/analytics
+app.get("/admin/analytics", async (req, res) => {
+  try {
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+
+    const signupsByDay = await usersCollection
+      .aggregate([
+        { $match: { createdAt: { $gte: thirtyDaysAgo } } },
+        {
+          $group: {
+            _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ])
+      .toArray();
+
+
+    const revenueByDay = await bookingsCollection
+      .aggregate([
+        {
+          $match: {
+            createdAt: { $gte: thirtyDaysAgo },
+            status: { $ne: "cancelled" },
+          },
+        },
+        {
+          $group: {
+            _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+            revenue: { $sum: "$totalPrice" },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ])
+      .toArray();
+
+
+    const roleDistribution = await usersCollection
+      .aggregate([
+        { $group: { _id: "$role", count: { $sum: 1 } } },
+      ])
+      .toArray();
+
+  
+    const bookingStatusBreakdown = await bookingsCollection
+      .aggregate([
+        { $group: { _id: "$status", count: { $sum: 1 } } },
+      ])
+      .toArray();
+
+    res.status(200).json({
+      signupsByDay,
+      revenueByDay,
+      roleDistribution,
+      bookingStatusBreakdown,
+    });
+  } catch (err) {
+    console.error("Error fetching admin analytics:", err);
     res.status(500).json({ error: "Something went wrong on our end." });
   }
 });
