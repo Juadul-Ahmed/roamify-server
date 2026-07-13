@@ -36,33 +36,49 @@ app.get("/", (req, res) => {
 });
 
 // POST /tours 
-app.post("/tours", async (req, res) => {
+app.get("/tours", async (req, res) => {
   try {
-    const { title, location, price, category, description, image, organizerId, organizerName } = req.body;
+    const { organizerId, search, category, sort, page = 1, limit = 9 } = req.query;
 
-    if (!title || !location || !price || !category || !description || !image) {
-      return res.status(400).json({ error: "All fields are required." });
+    const query = {};
+
+    if (organizerId) {
+      query.organizerId = organizerId;
     }
 
-    const tour = {
-      title,
-      location,
-      price: Number(price),
-      category,
-      description,
-      image,
-      rating: 0,
-      organizerId,
-      organizerName,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
+    if (category && category !== "All") {
+      query.category = category;
+    }
 
-    const result = await toursCollection.insertOne(tour);
+    if (search) {
+      const regex = { $regex: String(search), $options: "i" };
+      query.$or = [{ title: regex }, { location: regex }];
+    }
 
-    res.status(201).json({ message: "Tour created successfully.", tourId: result.insertedId });
+    let sortSpec = { createdAt: -1 };
+    if (sort === "price_asc") sortSpec = { price: 1 };
+    else if (sort === "price_desc") sortSpec = { price: -1 };
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.max(1, parseInt(limit, 10) || 6);
+    const skip = (pageNum - 1) * limitNum;
+
+    const [tours, totalCount] = await Promise.all([
+      toursCollection.find(query).sort(sortSpec).skip(skip).limit(limitNum).toArray(),
+      toursCollection.countDocuments(query),
+    ]);
+
+    res.status(200).json({
+      tours,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        totalCount,
+        totalPages: Math.ceil(totalCount / limitNum),
+      },
+    });
   } catch (err) {
-    console.error("Error creating tour:", err);
+    console.error("Error fetching tours:", err);
     res.status(500).json({ error: "Something went wrong on our end." });
   }
 });
