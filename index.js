@@ -238,6 +238,37 @@ app.post("/bookings", async (req, res) => {
   }
 });
 
+app.patch("/bookings/:id/status", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ error: "Invalid booking id." });
+    }
+
+    const allowedStatuses = ["pending", "confirmed", "cancelled"];
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).json({ error: "Invalid status." });
+    }
+
+    const result = await bookingsCollection.findOneAndUpdate(
+      { _id: new ObjectId(id) },
+      { $set: { status, updatedAt: new Date() } },
+      { returnDocument: "after" }
+    );
+
+    if (!result) {
+      return res.status(404).json({ error: "Booking not found." });
+    }
+
+    res.status(200).json({ message: "Booking status updated.", booking: result });
+  } catch (err) {
+    console.error("Error updating booking status:", err);
+    res.status(500).json({ error: "Something went wrong on our end." });
+  }
+});
+
 // GET /organizer/stats
 app.get("/organizer/stats", async (req, res) => {
   try {
@@ -305,6 +336,89 @@ app.get("/admin/stats", async (req, res) => {
     });
   } catch (err) {
     console.error("Error fetching admin stats:", err);
+    res.status(500).json({ error: "Something went wrong on our end." });
+  }
+});
+
+// GET /admin/users — list all users, with optional search and role filter
+app.get("/admin/users", async (req, res) => {
+  try {
+    const { search, role } = req.query;
+
+    const query = {};
+
+    if (role && role !== "All") {
+      query.role = role;
+    }
+
+    if (search) {
+      const regex = { $regex: String(search), $options: "i" };
+      query.$or = [{ name: regex }, { email: regex }];
+    }
+
+    const users = await usersCollection
+      .find(query)
+      .sort({ createdAt: -1 })
+      .project({ name: 1, email: 1, role: 1, createdAt: 1, emailVerified: 1 })
+      .toArray();
+
+    res.status(200).json({ users });
+  } catch (err) {
+    console.error("Error fetching users:", err);
+    res.status(500).json({ error: "Something went wrong on our end." });
+  }
+});
+
+// PATCH /admin/users/:id/role — change a user's role (admin only action)
+app.patch("/admin/users/:id/role", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { role } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ error: "Invalid user id." });
+    }
+
+    const allowedRoles = ["traveler", "organizer", "admin"];
+    if (!allowedRoles.includes(role)) {
+      return res.status(400).json({ error: "Invalid role." });
+    }
+
+    const result = await usersCollection.findOneAndUpdate(
+      { _id: new ObjectId(id) },
+      { $set: { role, updatedAt: new Date() } },
+      { returnDocument: "after" }
+    );
+
+    if (!result) {
+      return res.status(404).json({ error: "User not found." });
+    }
+
+    res.status(200).json({ message: "Role updated successfully.", user: result });
+  } catch (err) {
+    console.error("Error updating user role:", err);
+    res.status(500).json({ error: "Something went wrong on our end." });
+  }
+});
+
+// DELETE /admin/users/:id — remove a user account
+app.delete("/admin/users/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ error: "Invalid user id." });
+    }
+
+    const result = await usersCollection.deleteOne({ _id: new ObjectId(id) });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ error: "User not found." });
+    }
+
+    res.status(200).json({ message: "User deleted successfully." });
+  } catch (err) {
+    console.error("Error deleting user:", err);
     res.status(500).json({ error: "Something went wrong on our end." });
   }
 });
