@@ -30,26 +30,95 @@ const db = client.db(dbName);
 const toursCollection = db.collection("tours");
 const usersCollection = db.collection("user");
 const bookingsCollection = db.collection("bookings");
+const sessionCollection = db.collection("session"); 
+
+// ── AUTH MIDDLEWARE
+
+const verifyToken = async (req, res, next) => {
+  try {
+    const authHeader = req.headers?.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Unauthorized — no token provided." });
+    }
+
+    const token = authHeader.split(" ")[1];
+
+    const session = await sessionCollection.findOne({ token });
+    if (!session) {
+      return res.status(401).json({ error: "Unauthorized — invalid or expired session." });
+    }
+
+    if (session.expiresAt && new Date(session.expiresAt) < new Date()) {
+      return res.status(401).json({ error: "Unauthorized — session expired." });
+    }
+
+    const user = await usersCollection.findOne({ _id: new ObjectId(session.userId) });
+    if (!user) {
+      return res.status(401).json({ error: "Unauthorized — user not found." });
+    }
+
+    req.user = user;
+    next();
+  } catch (err) {
+    console.error("verifyToken error:", err);
+    res.status(500).json({ error: "Internal server error during authentication." });
+  }
+};
+
+//   verifyRole(["organizer", "admin"])
+const verifyRole = (allowedRoles) => (req, res, next) => {
+  const roles = Array.isArray(allowedRoles) ? allowedRoles : [allowedRoles];
+  if (!roles.includes(req.user?.role)) {
+    return res.status(403).json({ error: "Forbidden — you don't have permission for this action." });
+  }
+  next();
+};
 
 app.get("/", (req, res) => {
   res.send("Hello World!");
 });
 
-// POST /tours 
+// POST /tours
+app.post("/tours", verifyToken, verifyRole(["organizer", "admin"]), async (req, res) => {
+  try {
+    const { title, location, price, category, description, image } = req.body;
+
+    if (!title || !location || !price || !category || !description || !image) {
+      return res.status(400).json({ error: "All fields are required." });
+    }
+
+    const tour = {
+      title,
+      location,
+      price: Number(price),
+      category,
+      description,
+      image,
+      rating: 0,
+      organizerId: req.user._id.toString(),
+      organizerName:
+        req.user.role === "admin" ? `${req.user.name} (Admin)` : req.user.name,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const result = await toursCollection.insertOne(tour);
+
+    res.status(201).json({ message: "Tour created successfully.", tourId: result.insertedId });
+  } catch (err) {
+    console.error("Error creating tour:", err);
+    res.status(500).json({ error: "Something went wrong on our end." });
+  }
+});
+
+// GET /tours
 app.get("/tours", async (req, res) => {
   try {
-    const { organizerId, search, category, sort, page = 1, limit = 9 } = req.query;
+    const { organizerId, search, category, sort, page = 1, limit = 6 } = req.query;
 
     const query = {};
-
-    if (organizerId) {
-      query.organizerId = organizerId;
-    }
-
-    if (category && category !== "All") {
-      query.category = category;
-    }
-
+    if (organizerId) query.organizerId = organizerId;
+    if (category && category !== "All") query.category = category;
     if (search) {
       const regex = { $regex: String(search), $options: "i" };
       query.$or = [{ title: regex }, { location: regex }];
@@ -74,42 +143,9 @@ app.get("/tours", async (req, res) => {
         page: pageNum,
         limit: limitNum,
         totalCount,
-        totalPages: Math.ceil(totalCount / limitNum),
+        totalPages: Math.ceil(totalCount / limitNum) || 1,
       },
     });
-  } catch (err) {
-    console.error("Error fetching tours:", err);
-    res.status(500).json({ error: "Something went wrong on our end." });
-  }
-});
-
-// GET /tours 
-app.get("/tours", async (req, res) => {
-  try {
-    const { organizerId, search, category, sort } = req.query;
-
-    const query = {};
-
-    if (organizerId) {
-      query.organizerId = organizerId;
-    }
-
-    if (category && category !== "All") {
-      query.category = category;
-    }
-
-    if (search) {
-      const regex = { $regex: String(search), $options: "i" };
-      query.$or = [{ title: regex }, { location: regex }];
-    }
-
-    let sortSpec = { createdAt: -1 };
-    if (sort === "price_asc") sortSpec = { price: 1 };
-    else if (sort === "price_desc") sortSpec = { price: -1 };
-
-    const tours = await toursCollection.find(query).sort(sortSpec).toArray();
-
-    res.status(200).json({ tours });
   } catch (err) {
     console.error("Error fetching tours:", err);
     res.status(500).json({ error: "Something went wrong on our end." });
@@ -120,16 +156,10 @@ app.get("/tours", async (req, res) => {
 app.get("/tours/:id", async (req, res) => {
   try {
     const { id } = req.params;
-
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({ error: "Invalid tour id." });
-    }
+    if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid tour id." });
 
     const tour = await toursCollection.findOne({ _id: new ObjectId(id) });
-
-    if (!tour) {
-      return res.status(404).json({ error: "Tour not found." });
-    }
+    if (!tour) return res.status(404).json({ error: "Tour not found." });
 
     res.status(200).json({ tour });
   } catch (err) {
@@ -139,40 +169,34 @@ app.get("/tours/:id", async (req, res) => {
 });
 
 // PATCH /tours/:id 
-app.patch("/tours/:id", async (req, res) => {
+app.patch("/tours/:id", verifyToken, verifyRole(["organizer", "admin"]), async (req, res) => {
   try {
     const { id } = req.params;
+    if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid tour id." });
 
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({ error: "Invalid tour id." });
+    const existingTour = await toursCollection.findOne({ _id: new ObjectId(id) });
+    if (!existingTour) return res.status(404).json({ error: "Tour not found." });
+
+  
+    if (req.user.role === "organizer" && existingTour.organizerId !== req.user._id.toString()) {
+      return res.status(403).json({ error: "You can only edit your own tours." });
     }
 
     const { title, location, price, category, description, image } = req.body;
-
     if (!title || !location || !price || !category || !description || !image) {
       return res.status(400).json({ error: "All fields are required." });
     }
-
 
     const result = await toursCollection.findOneAndUpdate(
       { _id: new ObjectId(id) },
       {
         $set: {
-          title,
-          location,
-          price: Number(price),
-          category,
-          description,
-          image,
+          title, location, price: Number(price), category, description, image,
           updatedAt: new Date(),
         },
       },
       { returnDocument: "after" }
     );
-
-    if (!result) {
-      return res.status(404).json({ error: "Tour not found." });
-    }
 
     res.status(200).json({ message: "Tour updated successfully.", tour: result });
   } catch (err) {
@@ -182,20 +206,19 @@ app.patch("/tours/:id", async (req, res) => {
 });
 
 // DELETE /tours/:id 
-app.delete("/tours/:id", async (req, res) => {
+app.delete("/tours/:id", verifyToken, verifyRole(["organizer", "admin"]), async (req, res) => {
   try {
     const { id } = req.params;
+    if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid tour id." });
 
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({ error: "Invalid tour id." });
+    const existingTour = await toursCollection.findOne({ _id: new ObjectId(id) });
+    if (!existingTour) return res.status(404).json({ error: "Tour not found." });
+
+    if (req.user.role === "organizer" && existingTour.organizerId !== req.user._id.toString()) {
+      return res.status(403).json({ error: "You can only delete your own tours." });
     }
 
-    const result = await toursCollection.deleteOne({ _id: new ObjectId(id) });
-
-    if (result.deletedCount === 0) {
-      return res.status(404).json({ error: "Tour not found." });
-    }
-
+    await toursCollection.deleteOne({ _id: new ObjectId(id) });
     res.status(200).json({ message: "Tour deleted successfully." });
   } catch (err) {
     console.error("Error deleting tour:", err);
@@ -204,26 +227,19 @@ app.delete("/tours/:id", async (req, res) => {
 });
 
 // POST /bookings 
-app.post("/bookings", async (req, res) => {
+app.post("/bookings", verifyToken, verifyRole("traveler"), async (req, res) => {
   try {
-    const { tourId, userId, userName, userEmail, guests, date } = req.body;
+    const { tourId, guests, date } = req.body;
 
-    if (!tourId || !userId || !guests || !date) {
-      return res.status(400).json({ error: "tourId, userId, guests, and date are required." });
+    if (!tourId || !guests || !date) {
+      return res.status(400).json({ error: "tourId, guests, and date are required." });
     }
-
-    if (!ObjectId.isValid(tourId)) {
-      return res.status(400).json({ error: "Invalid tour id." });
-    }
+    if (!ObjectId.isValid(tourId)) return res.status(400).json({ error: "Invalid tour id." });
 
     const tour = await toursCollection.findOne({ _id: new ObjectId(tourId) });
-
-    if (!tour) {
-      return res.status(404).json({ error: "Tour not found." });
-    }
+    if (!tour) return res.status(404).json({ error: "Tour not found." });
 
     const guestCount = Number(guests);
-
     if (!Number.isInteger(guestCount) || guestCount < 1) {
       return res.status(400).json({ error: "Guests must be a positive whole number." });
     }
@@ -233,9 +249,9 @@ app.post("/bookings", async (req, res) => {
       tourTitle: tour.title,
       tourImage: tour.image,
       organizerId: tour.organizerId,
-      userId,
-      userName: userName || null,
-      userEmail: userEmail || null,
+      userId: req.user._id.toString(),
+      userName: req.user.name,
+      userEmail: req.user.email,
       guests: guestCount,
       date: new Date(date),
       pricePerPerson: tour.price,
@@ -246,7 +262,6 @@ app.post("/bookings", async (req, res) => {
     };
 
     const result = await bookingsCollection.insertOne(booking);
-
     res.status(201).json({ message: "Booking created successfully.", bookingId: result.insertedId });
   } catch (err) {
     console.error("Error creating booking:", err);
@@ -254,18 +269,21 @@ app.post("/bookings", async (req, res) => {
   }
 });
 
-app.patch("/bookings/:id/status", async (req, res) => {
+// PATCH /bookings/:id/status
+app.patch("/bookings/:id/status", verifyToken, verifyRole(["organizer", "admin"]), async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
-
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({ error: "Invalid booking id." });
-    }
+    if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid booking id." });
 
     const allowedStatuses = ["pending", "confirmed", "cancelled"];
-    if (!allowedStatuses.includes(status)) {
-      return res.status(400).json({ error: "Invalid status." });
+    if (!allowedStatuses.includes(status)) return res.status(400).json({ error: "Invalid status." });
+
+    const existingBooking = await bookingsCollection.findOne({ _id: new ObjectId(id) });
+    if (!existingBooking) return res.status(404).json({ error: "Booking not found." });
+
+    if (req.user.role === "organizer" && existingBooking.organizerId !== req.user._id.toString()) {
+      return res.status(403).json({ error: "You can only manage bookings on your own tours." });
     }
 
     const result = await bookingsCollection.findOneAndUpdate(
@@ -274,10 +292,6 @@ app.patch("/bookings/:id/status", async (req, res) => {
       { returnDocument: "after" }
     );
 
-    if (!result) {
-      return res.status(404).json({ error: "Booking not found." });
-    }
-
     res.status(200).json({ message: "Booking status updated.", booking: result });
   } catch (err) {
     console.error("Error updating booking status:", err);
@@ -285,21 +299,16 @@ app.patch("/bookings/:id/status", async (req, res) => {
   }
 });
 
-// GET /organizer/stats
-app.get("/organizer/stats", async (req, res) => {
+// GET /organizer/stats — the organizer viewing their own stats only
+app.get("/organizer/stats", verifyToken, verifyRole("organizer"), async (req, res) => {
   try {
-    const { organizerId } = req.query;
-
-    if (!organizerId) {
-      return res.status(400).json({ error: "organizerId is required." });
-    }
+    const organizerId = req.user._id.toString();
 
     const tours = await toursCollection.find({ organizerId }).toArray();
     const bookings = await bookingsCollection.find({ organizerId }).toArray();
 
     const totalTours = tours.length;
     const totalBookings = bookings.length;
-
     const totalRevenue = bookings
       .filter((b) => b.status !== "cancelled")
       .reduce((sum, b) => sum + (b.totalPrice || 0), 0);
@@ -310,21 +319,60 @@ app.get("/organizer/stats", async (req, res) => {
         ? ratedTours.reduce((sum, t) => sum + t.rating, 0) / ratedTours.length
         : 0;
 
-    res.status(200).json({
-      stats: {
-        totalTours,
-        totalBookings,
-        totalRevenue,
-        averageRating,
-      },
-    });
+    res.status(200).json({ stats: { totalTours, totalBookings, totalRevenue, averageRating } });
   } catch (err) {
     console.error("Error fetching organizer stats:", err);
     res.status(500).json({ error: "Something went wrong on our end." });
   }
 });
-// GET /admin/stats
-app.get("/admin/stats", async (req, res) => {
+
+// GET /bookings 
+app.get("/bookings", verifyToken, async (req, res) => {
+  try {
+    let query;
+
+    if (req.user.role === "admin") {
+      const { userId, organizerId } = req.query;
+      query = userId ? { userId } : organizerId ? { organizerId } : {};
+    } else if (req.user.role === "organizer") {
+      query = { organizerId: req.user._id.toString() };
+    } else {
+      query = { userId: req.user._id.toString() };
+    }
+
+    const bookings = await bookingsCollection.find(query).sort({ createdAt: -1 }).toArray();
+    res.status(200).json({ bookings });
+  } catch (err) {
+    console.error("Error fetching bookings:", err);
+    res.status(500).json({ error: "Something went wrong on our end." });
+  }
+});
+
+// DELETE /bookings/:id 
+app.delete("/bookings/:id", verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid booking id." });
+
+    const existingBooking = await bookingsCollection.findOne({ _id: new ObjectId(id) });
+    if (!existingBooking) return res.status(404).json({ error: "Booking not found." });
+
+    const isOwner = existingBooking.userId === req.user._id.toString();
+    if (!isOwner && req.user.role !== "admin") {
+      return res.status(403).json({ error: "You can only cancel your own bookings." });
+    }
+
+    await bookingsCollection.deleteOne({ _id: new ObjectId(id) });
+    res.status(200).json({ message: "Booking cancelled successfully." });
+  } catch (err) {
+    console.error("Error cancelling booking:", err);
+    res.status(500).json({ error: "Something went wrong on our end." });
+  }
+});
+
+// ── ADMIN ROUTES 
+
+app.get("/admin/stats", verifyToken, verifyRole("admin"), async (req, res) => {
   try {
     const [totalUsers, totalOrganizers, totalTravelers, totalTours, allBookings] = await Promise.all([
       usersCollection.countDocuments({}),
@@ -335,20 +383,12 @@ app.get("/admin/stats", async (req, res) => {
     ]);
 
     const totalBookings = allBookings.length;
-
     const totalRevenue = allBookings
       .filter((b) => b.status !== "cancelled")
       .reduce((sum, b) => sum + (b.totalPrice || 0), 0);
 
     res.status(200).json({
-      stats: {
-        totalUsers,
-        totalOrganizers,
-        totalTravelers,
-        totalTours,
-        totalBookings,
-        totalRevenue,
-      },
+      stats: { totalUsers, totalOrganizers, totalTravelers, totalTours, totalBookings, totalRevenue },
     });
   } catch (err) {
     console.error("Error fetching admin stats:", err);
@@ -356,17 +396,11 @@ app.get("/admin/stats", async (req, res) => {
   }
 });
 
-// GET /admin/users — list all users, with optional search and role filter
-app.get("/admin/users", async (req, res) => {
+app.get("/admin/users", verifyToken, verifyRole("admin"), async (req, res) => {
   try {
     const { search, role } = req.query;
-
     const query = {};
-
-    if (role && role !== "All") {
-      query.role = role;
-    }
-
+    if (role && role !== "All") query.role = role;
     if (search) {
       const regex = { $regex: String(search), $options: "i" };
       query.$or = [{ name: regex }, { email: regex }];
@@ -385,20 +419,14 @@ app.get("/admin/users", async (req, res) => {
   }
 });
 
-// PATCH /admin/users/:id/role — change a user's role (admin only action)
-app.patch("/admin/users/:id/role", async (req, res) => {
+app.patch("/admin/users/:id/role", verifyToken, verifyRole("admin"), async (req, res) => {
   try {
     const { id } = req.params;
     const { role } = req.body;
-
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({ error: "Invalid user id." });
-    }
+    if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid user id." });
 
     const allowedRoles = ["traveler", "organizer", "admin"];
-    if (!allowedRoles.includes(role)) {
-      return res.status(400).json({ error: "Invalid role." });
-    }
+    if (!allowedRoles.includes(role)) return res.status(400).json({ error: "Invalid role." });
 
     const result = await usersCollection.findOneAndUpdate(
       { _id: new ObjectId(id) },
@@ -406,10 +434,7 @@ app.patch("/admin/users/:id/role", async (req, res) => {
       { returnDocument: "after" }
     );
 
-    if (!result) {
-      return res.status(404).json({ error: "User not found." });
-    }
-
+    if (!result) return res.status(404).json({ error: "User not found." });
     res.status(200).json({ message: "Role updated successfully.", user: result });
   } catch (err) {
     console.error("Error updating user role:", err);
@@ -417,20 +442,13 @@ app.patch("/admin/users/:id/role", async (req, res) => {
   }
 });
 
-// DELETE /admin/users/:id — remove a user account
-app.delete("/admin/users/:id", async (req, res) => {
+app.delete("/admin/users/:id", verifyToken, verifyRole("admin"), async (req, res) => {
   try {
     const { id } = req.params;
-
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({ error: "Invalid user id." });
-    }
+    if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid user id." });
 
     const result = await usersCollection.deleteOne({ _id: new ObjectId(id) });
-
-    if (result.deletedCount === 0) {
-      return res.status(404).json({ error: "User not found." });
-    }
+    if (result.deletedCount === 0) return res.status(404).json({ error: "User not found." });
 
     res.status(200).json({ message: "User deleted successfully." });
   } catch (err) {
@@ -439,107 +457,34 @@ app.delete("/admin/users/:id", async (req, res) => {
   }
 });
 
-// GET /admin/analytics
-app.get("/admin/analytics", async (req, res) => {
+app.get("/admin/analytics", verifyToken, verifyRole("admin"), async (req, res) => {
   try {
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
+    const signupsByDay = await usersCollection.aggregate([
+      { $match: { createdAt: { $gte: thirtyDaysAgo } } },
+      { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } }, count: { $sum: 1 } } },
+      { $sort: { _id: 1 } },
+    ]).toArray();
 
-    const signupsByDay = await usersCollection
-      .aggregate([
-        { $match: { createdAt: { $gte: thirtyDaysAgo } } },
-        {
-          $group: {
-            _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
-            count: { $sum: 1 },
-          },
-        },
-        { $sort: { _id: 1 } },
-      ])
-      .toArray();
+    const revenueByDay = await bookingsCollection.aggregate([
+      { $match: { createdAt: { $gte: thirtyDaysAgo }, status: { $ne: "cancelled" } } },
+      { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } }, revenue: { $sum: "$totalPrice" } } },
+      { $sort: { _id: 1 } },
+    ]).toArray();
 
+    const roleDistribution = await usersCollection.aggregate([
+      { $group: { _id: "$role", count: { $sum: 1 } } },
+    ]).toArray();
 
-    const revenueByDay = await bookingsCollection
-      .aggregate([
-        {
-          $match: {
-            createdAt: { $gte: thirtyDaysAgo },
-            status: { $ne: "cancelled" },
-          },
-        },
-        {
-          $group: {
-            _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
-            revenue: { $sum: "$totalPrice" },
-          },
-        },
-        { $sort: { _id: 1 } },
-      ])
-      .toArray();
+    const bookingStatusBreakdown = await bookingsCollection.aggregate([
+      { $group: { _id: "$status", count: { $sum: 1 } } },
+    ]).toArray();
 
-
-    const roleDistribution = await usersCollection
-      .aggregate([
-        { $group: { _id: "$role", count: { $sum: 1 } } },
-      ])
-      .toArray();
-
-  
-    const bookingStatusBreakdown = await bookingsCollection
-      .aggregate([
-        { $group: { _id: "$status", count: { $sum: 1 } } },
-      ])
-      .toArray();
-
-    res.status(200).json({
-      signupsByDay,
-      revenueByDay,
-      roleDistribution,
-      bookingStatusBreakdown,
-    });
+    res.status(200).json({ signupsByDay, revenueByDay, roleDistribution, bookingStatusBreakdown });
   } catch (err) {
     console.error("Error fetching admin analytics:", err);
-    res.status(500).json({ error: "Something went wrong on our end." });
-  }
-});
-app.get("/bookings", async (req, res) => {
-  try {
-    const { userId, organizerId } = req.query;
-
-    if (!userId && !organizerId) {
-      return res.status(400).json({ error: "userId or organizerId is required." });
-    }
-
-    const query = userId ? { userId } : { organizerId };
-
-    const bookings = await bookingsCollection.find(query).sort({ createdAt: -1 }).toArray();
-
-    res.status(200).json({ bookings });
-  } catch (err) {
-    console.error("Error fetching bookings:", err);
-    res.status(500).json({ error: "Something went wrong on our end." });
-  }
-});
-
-// DELETE /bookings/:id — cancel a booking
-app.delete("/bookings/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({ error: "Invalid booking id." });
-    }
-
-    const result = await bookingsCollection.deleteOne({ _id: new ObjectId(id) });
-
-    if (result.deletedCount === 0) {
-      return res.status(404).json({ error: "Booking not found." });
-    }
-
-    res.status(200).json({ message: "Booking cancelled successfully." });
-  } catch (err) {
-    console.error("Error cancelling booking:", err);
     res.status(500).json({ error: "Something went wrong on our end." });
   }
 });
@@ -548,7 +493,6 @@ async function startServer() {
   try {
     await client.connect();
     console.log("You successfully connected to MongoDB!");
-
     app.listen(port, () => {
       console.log(`Example app listening on port ${port}`);
     });
