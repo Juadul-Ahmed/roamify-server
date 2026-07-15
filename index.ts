@@ -78,12 +78,7 @@ declare global {
 const app = express();
 const port = process.env.PORT || 5000;
 
-app.use(
-  cors({
-    origin: "http://localhost:3000",
-    credentials: true,
-  })
-);
+app.use(cors());
 app.use(express.json());
 
 if (!process.env.MONGO_DB_URI) {
